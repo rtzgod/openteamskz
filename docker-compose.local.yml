@@ -1,0 +1,411 @@
+# =============================================================================
+# OpenTeams LOCAL Development Stack
+# For local testing without HTTPS - uses localhost and direct port mappings
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# NETWORKS
+# -----------------------------------------------------------------------------
+networks:
+  proxy_net:
+    driver: bridge
+  data_net:
+    driver: bridge
+    internal: true
+
+# -----------------------------------------------------------------------------
+# VOLUMES
+# -----------------------------------------------------------------------------
+volumes:
+  mongodb_data:
+  nextcloud_db_data:
+  nextcloud_redis_data:
+  lldap_data:
+  nextcloud_data:
+  wekan_files:
+  jitsi_web_config:
+  jitsi_web_crontabs:
+  jitsi_web_transcripts:
+  jitsi_prosody_config:
+  jitsi_prosody_plugins:
+  jitsi_jicofo_config:
+  jitsi_jvb_config:
+  backup_data:
+
+    # -----------------------------------------------------------------------------
+    # SERVICES
+    # -----------------------------------------------------------------------------
+services:
+
+  # ===========================================================================
+  # GATEWAY: Traefik v3 (HTTP only for local dev)
+  # ===========================================================================
+  traefik:
+    container_name: openteams-traefik
+    image: traefik:v3.6.7
+    restart: ${RESTART_POLICY:-unless-stopped}
+    command:
+      - "--api.insecure=true"
+      - "--api.dashboard=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=${COMPOSE_PROJECT_NAME:-openteamskz}_proxy_net"
+      - "--entrypoints.web.address=:80"
+    ports:
+      - "80:80"
+      - "8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - proxy_net
+    environment:
+      - TZ=${TZ:-UTC}
+    labels:
+      # Root domain redirect to Nextcloud
+      - "traefik.enable=true"
+      - "traefik.http.routers.root-redirect.rule=Host(`localhost`) || Host(`openteams.localhost`)"
+      - "traefik.http.routers.root-redirect.entrypoints=web"
+      - "traefik.http.middlewares.root-to-cloud.redirectregex.regex=^http://(localhost|openteams.localhost)/(.*)"
+      - "traefik.http.middlewares.root-to-cloud.redirectregex.replacement=http://cloud.localhost/$${2}"
+      - "traefik.http.routers.root-redirect.middlewares=root-to-cloud"
+      - "traefik.http.routers.root-redirect.service=noop@internal"
+
+  # ===========================================================================
+  # IDENTITY: LLDAP
+  # ===========================================================================
+  lldap:
+    container_name: openteams-lldap
+    image: lldap/lldap:stable
+    restart: ${RESTART_POLICY:-unless-stopped}
+    environment:
+      - LLDAP_JWT_SECRET=${LLDAP_JWT_SECRET:-localdevjwtsecret123456789012345}
+      - LLDAP_LDAP_USER_PASS=${LLDAP_ADMIN_PASSWORD:-admin123}
+      - LLDAP_LDAP_BASE_DN=${LLDAP_BASE_DN:-dc=openteams,dc=local}
+      - TZ=${TZ:-UTC}
+    volumes:
+      - lldap_data:/data
+    networks:
+      - data_net
+      - proxy_net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.lldap.rule=Host(`ldap.localhost`)"
+      - "traefik.http.routers.lldap.entrypoints=web"
+      - "traefik.http.services.lldap.loadbalancer.server.port=17170"
+      - "openteams-backup.stop-during-backup=true"
+
+  # ===========================================================================
+  # DATABASE: MongoDB with Replica Set (No Auth - Internal Network Only)
+  # ===========================================================================
+  mongodb:
+    container_name: openteams-mongodb
+    image: mongo:7.0
+    restart: ${RESTART_POLICY:-unless-stopped}
+    command: [ "--replSet", "rs0", "--bind_ip_all" ]
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - data_net
+    healthcheck:
+      test: [ "CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok" ]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    labels:
+      - "openteams-backup.stop-during-backup=true"
+
+  # ===========================================================================
+  # DATABASE: MariaDB (Nextcloud)
+  # ===========================================================================
+  nextcloud_db:
+    container_name: openteams-nextcloud-db
+    image: mariadb:10.6
+    restart: ${RESTART_POLICY:-unless-stopped}
+    command: --transaction-isolation=READ-COMMITTED --binlog-format=ROW
+    environment:
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:-localrootpass}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD:-nextcloudpass}
+      - MYSQL_DATABASE=${MYSQL_DATABASE:-nextcloud}
+      - MYSQL_USER=${MYSQL_USER:-nextcloud}
+      - TZ=${TZ:-UTC}
+    volumes:
+      - nextcloud_db_data:/var/lib/mysql
+    networks:
+      - data_net
+    labels:
+      - "openteams-backup.stop-during-backup=true"
+
+  # ===========================================================================
+  # CACHE: Redis (Nextcloud)
+  # ===========================================================================
+  nextcloud_redis:
+    container_name: openteams-nextcloud-redis
+    image: redis:7-alpine
+    restart: ${RESTART_POLICY:-unless-stopped}
+    command: redis-server --requirepass ${REDIS_PASSWORD:-localredispass}
+    environment:
+      - TZ=${TZ:-UTC}
+    volumes:
+      - nextcloud_redis_data:/data
+    networks:
+      - data_net
+
+  # ===========================================================================
+  # APPLICATION: Nextcloud
+  # ===========================================================================
+  nextcloud:
+    container_name: openteams-nextcloud
+    image: nextcloud:29
+    restart: ${RESTART_POLICY:-unless-stopped}
+    environment:
+      - REDIS_HOST=nextcloud_redis
+      - REDIS_HOST_PASSWORD=${REDIS_PASSWORD:-localredispass}
+      - MYSQL_HOST=nextcloud_db
+      - MYSQL_DATABASE=${MYSQL_DATABASE:-nextcloud}
+      - MYSQL_USER=${MYSQL_USER:-nextcloud}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD:-nextcloudpass}
+      - NEXTCLOUD_TRUSTED_DOMAINS=cloud.localhost localhost
+      - OVERWRITEPROTOCOL=http
+      - TZ=${TZ:-UTC}
+    volumes:
+      - nextcloud_data:/var/www/html
+    networks:
+      - proxy_net
+      - data_net
+    depends_on:
+      - nextcloud_db
+      - nextcloud_redis
+      - lldap
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.nextcloud.rule=Host(`cloud.localhost`)"
+      - "traefik.http.routers.nextcloud.entrypoints=web"
+      - "traefik.http.services.nextcloud.loadbalancer.server.port=80"
+
+  # ===========================================================================
+  # APPLICATION: Rocket.Chat
+  # ===========================================================================
+  rocketchat:
+    container_name: openteams-rocketchat
+    image: rocketchat/rocket.chat:${ROCKETCHAT_VERSION:-latest}
+    restart: ${RESTART_POLICY:-unless-stopped}
+    environment:
+      - MONGO_URL=mongodb://mongodb:27017/rocketchat?replicaSet=rs0
+      - MONGO_OPLOG_URL=mongodb://mongodb:27017/local?replicaSet=rs0
+      - ROOT_URL=http://chat.localhost
+      - PORT=3000
+      - DEPLOY_METHOD=docker
+      - TZ=${TZ:-UTC}
+    networks:
+      - proxy_net
+      - data_net
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      lldap:
+        condition: service_started
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.rocketchat.rule=Host(`chat.localhost`)"
+      - "traefik.http.routers.rocketchat.entrypoints=web"
+      - "traefik.http.services.rocketchat.loadbalancer.server.port=3000"
+
+  # ===========================================================================
+  # APPLICATION: Wekan
+  # ===========================================================================
+  wekan:
+    container_name: openteams-wekan
+    image: ghcr.io/wekan/wekan:v7.73
+    restart: ${RESTART_POLICY:-unless-stopped}
+    environment:
+      - MONGO_URL=mongodb://mongodb:27017/wekan
+      - ROOT_URL=http://boards.localhost
+      - WITH_API=true
+      - TZ=${TZ:-UTC}
+      # LDAP Configuration
+      - DEFAULT_AUTHENTICATION_METHOD=ldap
+      - LDAP_ENABLE=true
+      - LDAP_PORT=3890
+      - LDAP_HOST=lldap
+      - LDAP_BASEDN=${LLDAP_BASE_DN:-dc=openteams,dc=local}
+      - LDAP_LOGIN_FALLBACK=false
+      - LDAP_RECONNECT=true
+      - LDAP_TIMEOUT=10000
+      - LDAP_IDLE_TIMEOUT=10000
+      - LDAP_CONNECT_TIMEOUT=10000
+      - LDAP_AUTHENTIFICATION=true
+      - LDAP_AUTHENTIFICATION_USERDN=uid=admin,ou=people,${LLDAP_BASE_DN:-dc=openteams,dc=local}
+      - LDAP_AUTHENTIFICATION_PASSWORD=${LLDAP_ADMIN_PASSWORD:-admin123}
+      - LDAP_LOG_ENABLED=true
+      - LDAP_USER_SEARCH_FILTER=(objectClass=person)
+      - LDAP_USER_SEARCH_SCOPE=sub
+      - LDAP_USER_SEARCH_FIELD=uid
+      - LDAP_SEARCH_PAGE_SIZE=0
+      - LDAP_SEARCH_SIZE_LIMIT=0
+      - LDAP_UNIQUE_IDENTIFIER_FIELD=uid
+      - LDAP_USERNAME_FIELD=uid
+      - LDAP_FULLNAME_FIELD=cn
+      - LDAP_EMAIL_FIELD=mail
+      - LDAP_SYNC_USER_DATA=true
+      - LDAP_SYNC_USER_DATA_FIELDMAP='{"cn":"name", "mail":"email"}'
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - wekan_files:/data:rw
+    networks:
+      - proxy_net
+      - data_net
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      lldap:
+        condition: service_started
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.wekan.rule=Host(`boards.localhost`)"
+      - "traefik.http.routers.wekan.entrypoints=web"
+      - "traefik.http.services.wekan.loadbalancer.server.port=8080"
+
+  # ===========================================================================
+  # JITSI: Web Interface
+  # ===========================================================================
+  jitsiweb:
+    container_name: openteams-jitsi-web
+    image: jitsi/web:stable-9584
+    restart: ${RESTART_POLICY:-unless-stopped}
+    volumes:
+      - jitsi_web_config:/config:Z
+      - jitsi_web_crontabs:/var/spool/cron/crontabs:Z
+      - jitsi_web_transcripts:/usr/share/jitsi-meet/transcripts:Z
+    environment:
+      - ENABLE_COLIBRI_WEBSOCKET=1
+      - ENABLE_XMPP_WEBSOCKET=1
+      - DISABLE_HTTPS=1
+      - ENABLE_HTTP_REDIRECT=0
+      - PUBLIC_URL=http://meet.localhost
+      - TZ=${TZ:-UTC}
+      - XMPP_DOMAIN=meet.jitsi
+      - XMPP_AUTH_DOMAIN=auth.meet.jitsi
+      - XMPP_BOSH_URL_BASE=http://prosody:5280
+      - XMPP_GUEST_DOMAIN=guest.meet.jitsi
+      - XMPP_MUC_DOMAIN=muc.meet.jitsi
+      - XMPP_RECORDER_DOMAIN=recorder.meet.jitsi
+    networks:
+      - proxy_net
+      - data_net
+    depends_on:
+      - prosody
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.jitsi.rule=Host(`meet.localhost`)"
+      - "traefik.http.routers.jitsi.entrypoints=web"
+      - "traefik.http.services.jitsi.loadbalancer.server.port=80"
+
+  # ===========================================================================
+  # JITSI: Prosody XMPP Server
+  # ===========================================================================
+  prosody:
+    container_name: openteams-jitsi-prosody
+    image: jitsi/prosody:stable-9584
+    restart: ${RESTART_POLICY:-unless-stopped}
+    expose:
+      - "5222"
+      - "5347"
+      - "5280"
+    volumes:
+      - jitsi_prosody_config:/config:Z
+      - jitsi_prosody_plugins:/prosody-plugins-custom:Z
+    environment:
+      - JICOFO_AUTH_PASSWORD=${JICOFO_AUTH_PASSWORD:-jicofopass123}
+      - JVB_AUTH_PASSWORD=${JVB_AUTH_PASSWORD:-jvbpass123}
+      - PUBLIC_URL=http://meet.localhost
+      - TZ=${TZ:-UTC}
+      - XMPP_DOMAIN=meet.jitsi
+      - XMPP_AUTH_DOMAIN=auth.meet.jitsi
+      - XMPP_GUEST_DOMAIN=guest.meet.jitsi
+      - XMPP_MUC_DOMAIN=muc.meet.jitsi
+      - XMPP_INTERNAL_MUC_DOMAIN=internal-muc.meet.jitsi
+      - XMPP_RECORDER_DOMAIN=recorder.meet.jitsi
+    networks:
+      data_net:
+        aliases:
+          - xmpp.meet.jitsi
+
+  # ===========================================================================
+  # JITSI: Jicofo Focus Component
+  # ===========================================================================
+  jicofo:
+    container_name: openteams-jitsi-jicofo
+    image: jitsi/jicofo:stable-9584
+    restart: ${RESTART_POLICY:-unless-stopped}
+    volumes:
+      - jitsi_jicofo_config:/config:Z
+    environment:
+      - JICOFO_AUTH_PASSWORD=${JICOFO_AUTH_PASSWORD:-jicofopass123}
+      - TZ=${TZ:-UTC}
+      - XMPP_DOMAIN=meet.jitsi
+      - XMPP_AUTH_DOMAIN=auth.meet.jitsi
+      - XMPP_INTERNAL_MUC_DOMAIN=internal-muc.meet.jitsi
+      - XMPP_MUC_DOMAIN=muc.meet.jitsi
+      - XMPP_SERVER=prosody
+    networks:
+      - data_net
+    depends_on:
+      - prosody
+
+  # ===========================================================================
+  # JITSI: JVB Video Bridge
+  # ===========================================================================
+  jvb:
+    container_name: openteams-jitsi-jvb
+    image: jitsi/jvb:stable-9584
+    restart: ${RESTART_POLICY:-unless-stopped}
+    ports:
+      - "${JVB_PORT:-10000}:${JVB_PORT:-10000}/udp"
+    volumes:
+      - jitsi_jvb_config:/config:Z
+    environment:
+      - DOCKER_HOST_ADDRESS=${DOCKER_HOST_ADDRESS:-127.0.0.1}
+      - JVB_AUTH_PASSWORD=${JVB_AUTH_PASSWORD:-jvbpass123}
+      - JVB_PORT=${JVB_PORT:-10000}
+      - JVB_STUN_SERVERS=meet-jit-si-turnrelay.jitsi.net:443
+      - PUBLIC_URL=http://meet.localhost
+      - TZ=${TZ:-UTC}
+      - XMPP_AUTH_DOMAIN=auth.meet.jitsi
+      - XMPP_INTERNAL_MUC_DOMAIN=internal-muc.meet.jitsi
+      - XMPP_SERVER=prosody
+      # Enable WebSocket for Colibri (required for WSL2/NAT environments)
+      - COLIBRI_WS_DOMAIN=meet.localhost
+      - COLIBRI_WS_TLS=false
+      - ENABLE_COLIBRI_WEBSOCKET=1
+      - JVB_WS_SERVER_ID=jvb1
+    networks:
+      - proxy_net
+      - data_net
+    depends_on:
+      - prosody
+
+  # ===========================================================================
+  # BACKUP: Automated Volume Backup (Sidecar)
+  # ===========================================================================
+  backup:
+    container_name: openteams-backup
+    image: offen/docker-volume-backup:v2
+    restart: ${RESTART_POLICY:-unless-stopped}
+    environment:
+      - BACKUP_CRON_EXPRESSION=0 3 * * *
+      - BACKUP_RETENTION_DAYS=7
+      - BACKUP_FILENAME=openteams-backup-%Y%m%d.tar.gz
+      - BACKUP_PRUNING_PREFIX=openteams-backup-
+      # Stop containers during backup for data consistency
+      - BACKUP_STOP_DURING_BACKUP_LABEL=openteams-backup.stop-during-backup
+    volumes:
+      - mongodb_data:/backup/mongodb:ro
+      - lldap_data:/backup/lldap:ro
+      - nextcloud_data:/backup/nextcloud:ro
+      - nextcloud_db_data:/backup/nextcloud_db:ro
+      - wekan_files:/backup/wekan_files:ro
+      - //var/run/docker.sock:/var/run/docker.sock:ro
+      - backup_data:/archive
+    networks:
+      - data_net
