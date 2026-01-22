@@ -44,6 +44,8 @@ volumes:
   jitsi_prosody_plugins:
   jitsi_jicofo_config:
   jitsi_jvb_config:
+  jitsi_jibri_config:
+  jitsi_recordings:
 
   # Backups
   backup_data:
@@ -316,6 +318,8 @@ services:
       - jitsi_web_crontabs:/var/spool/cron/crontabs:Z
       - jitsi_web_transcripts:/usr/share/jitsi-meet/transcripts:Z
     environment:
+      - ENABLE_AUTH=1
+      - ENABLE_GUESTS=1
       - ENABLE_COLIBRI_WEBSOCKET=1
       - ENABLE_XMPP_WEBSOCKET=1
       - DISABLE_HTTPS=1
@@ -355,8 +359,22 @@ services:
       - jitsi_prosody_config:/config:Z
       - jitsi_prosody_plugins:/prosody-plugins-custom:Z
     environment:
+      # Authentication
+      - ENABLE_AUTH=1
+      - ENABLE_GUESTS=1
+      - AUTH_TYPE=ldap
+      - LDAP_URL=ldap://lldap:3890
+      - LDAP_BASE=ou=people,${LLDAP_BASE_DN}
+      - LDAP_BINDDN=uid=admin,ou=people,${LLDAP_BASE_DN}
+      - LDAP_BINDPW=${LLDAP_ADMIN_PASSWORD}
+      - LDAP_FILTER=(uid=%u)
+      - LDAP_AUTH_METHOD=bind
+      - LDAP_USE_TLS=0
+      # Jitsi components
       - JICOFO_AUTH_PASSWORD=${JICOFO_AUTH_PASSWORD}
       - JVB_AUTH_PASSWORD=${JVB_AUTH_PASSWORD}
+      - JIBRI_RECORDER_PASSWORD=${JIBRI_RECORDER_PASSWORD}
+      - JIBRI_XMPP_PASSWORD=${JIBRI_XMPP_PASSWORD}
       - PUBLIC_URL=https://meet.${DOMAIN_NAME}
       - TZ=${TZ:-UTC}
       - XMPP_DOMAIN=meet.jitsi
@@ -369,6 +387,9 @@ services:
       data_net:
         aliases:
           - xmpp.meet.jitsi
+    depends_on:
+      lldap:
+        condition: service_healthy
 
   # ===========================================================================
   # JITSI: Jicofo Focus Component
@@ -380,6 +401,8 @@ services:
     volumes:
       - jitsi_jicofo_config:/config:Z
     environment:
+      - ENABLE_AUTH=1
+      - AUTH_TYPE=ldap
       - JICOFO_AUTH_PASSWORD=${JICOFO_AUTH_PASSWORD}
       - TZ=${TZ:-UTC}
       - XMPP_DOMAIN=meet.jitsi
@@ -387,6 +410,9 @@ services:
       - XMPP_INTERNAL_MUC_DOMAIN=internal-muc.meet.jitsi
       - XMPP_MUC_DOMAIN=muc.meet.jitsi
       - XMPP_SERVER=prosody
+      # Jibri recording
+      - JIBRI_BREWERY_MUC=jibribrewery
+      - JIBRI_PENDING_TIMEOUT=90
     networks:
       - data_net
     depends_on:
@@ -415,6 +441,36 @@ services:
       - XMPP_SERVER=prosody
     networks:
       - proxy_net
+      - data_net
+    depends_on:
+      - prosody
+
+  # ===========================================================================
+  # JITSI: Jibri Recording Service
+  # NOTE: Requires host ALSA loopback module: sudo modprobe snd-aloop
+  # ===========================================================================
+  jibri:
+    container_name: openteams-jitsi-jibri
+    image: jitsi/jibri:stable-9584
+    restart: ${RESTART_POLICY:-unless-stopped}
+    privileged: true
+    shm_size: 2gb
+    volumes:
+      - jitsi_jibri_config:/config:Z
+      - jitsi_recordings:/recordings:Z
+    environment:
+      - DISPLAY=:0
+      - JIBRI_RECORDER_PASSWORD=${JIBRI_RECORDER_PASSWORD}
+      - JIBRI_XMPP_PASSWORD=${JIBRI_XMPP_PASSWORD}
+      - PUBLIC_URL=https://meet.${DOMAIN_NAME}
+      - TZ=${TZ:-UTC}
+      - XMPP_AUTH_DOMAIN=auth.meet.jitsi
+      - XMPP_DOMAIN=meet.jitsi
+      - XMPP_INTERNAL_MUC_DOMAIN=internal-muc.meet.jitsi
+      - XMPP_MUC_DOMAIN=muc.meet.jitsi
+      - XMPP_RECORDER_DOMAIN=recorder.meet.jitsi
+      - XMPP_SERVER=prosody
+    networks:
       - data_net
     depends_on:
       - prosody
