@@ -285,7 +285,7 @@ services:
       - LDAP_FULLNAME_FIELD=cn
       - LDAP_EMAIL_FIELD=mail
       - LDAP_SYNC_USER_DATA=true
-      - LDAP_SYNC_USER_DATA_FIELDMAP='{"cn":"name", "mail":"email"}'
+      - LDAP_SYNC_USER_DATA_FIELDMAP={"cn":"name", "mail":"email"}
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - wekan_files:/data:rw
