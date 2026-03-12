@@ -26,7 +26,7 @@ docker compose -f docker-compose.local.yml up -d
 docker exec openteams-mongodb mongosh --quiet --eval "rs.initiate({_id: 'rs0', members: [{_id: 0, host: 'mongodb:27017'}]})"
 ```
 
-Access services at `http://<service>.localhost`
+Access services at `http://<service>.localhost` (add domain names in /etc/hosts)
 
 ## Production Deployment
 
