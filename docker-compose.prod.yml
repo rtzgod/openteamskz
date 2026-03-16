@@ -89,6 +89,17 @@ services:
       - proxy_net
     environment:
       - TZ=${TZ:-UTC}
+    labels:
+      # Security headers middleware (used by all routers)
+      - "traefik.enable=true"
+      - "traefik.http.middlewares.security-headers.headers.browserXssFilter=true"
+      - "traefik.http.middlewares.security-headers.headers.contentTypeNosniff=true"
+      - "traefik.http.middlewares.security-headers.headers.frameDeny=true"
+      - "traefik.http.middlewares.security-headers.headers.stsSeconds=31536000"
+      - "traefik.http.middlewares.security-headers.headers.stsIncludeSubdomains=true"
+      - "traefik.http.middlewares.security-headers.headers.stsPreload=true"
+      - "traefik.http.middlewares.security-headers.headers.referrerPolicy=strict-origin-when-cross-origin"
+      - "traefik.http.middlewares.security-headers.headers.permissionsPolicy=camera=(), microphone=(), geolocation=()"
 
   # ===========================================================================
   # IDENTITY: LLDAP
@@ -127,6 +138,8 @@ services:
     environment:
       - MONGO_INITDB_ROOT_USERNAME=root
       - MONGO_INITDB_ROOT_PASSWORD=${MONGO_ROOT_PASS}
+      - RC_DB_PASS=${RC_DB_PASS}
+      - WEKAN_DB_PASS=${WEKAN_DB_PASS}
     volumes:
       - mongodb_data:/data/db
       - ./mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
@@ -134,7 +147,7 @@ services:
       - data_net # Internal only - NOT on proxy_net
     healthcheck:
       test: |
-        mongosh --quiet -u root -p ${MONGO_ROOT_PASS} --authenticationDatabase admin --eval "
+        mongosh --quiet --eval "
         try {
           rs.status().ok
         } catch(e) {
@@ -219,7 +232,7 @@ services:
       - "traefik.http.middlewares.nextcloud-caldav.redirectregex.permanent=true"
       - "traefik.http.middlewares.nextcloud-caldav.redirectregex.regex=^https://(.*)/.well-known/(card|cal)dav"
       - "traefik.http.middlewares.nextcloud-caldav.redirectregex.replacement=https://$${1}/remote.php/dav/"
-      - "traefik.http.routers.nextcloud.middlewares=nextcloud-caldav"
+      - "traefik.http.routers.nextcloud.middlewares=nextcloud-caldav,security-headers"
 
   # ===========================================================================
   # APPLICATION: Rocket.Chat
@@ -439,11 +452,23 @@ services:
       - XMPP_AUTH_DOMAIN=auth.meet.jitsi
       - XMPP_INTERNAL_MUC_DOMAIN=internal-muc.meet.jitsi
       - XMPP_SERVER=prosody
+      # Colibri WebSocket (required for media transport)
+      - COLIBRI_WS_DOMAIN=meet.${DOMAIN_NAME}
+      - COLIBRI_WS_TLS=true
+      - ENABLE_COLIBRI_WEBSOCKET=1
+      - JVB_WS_SERVER_ID=jvb1
     networks:
       - proxy_net
       - data_net
     depends_on:
       - prosody
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.jvb-ws.rule=Host(`meet.${DOMAIN_NAME}`) && PathPrefix(`/colibri-ws/`)"
+      - "traefik.http.routers.jvb-ws.entrypoints=websecure"
+      - "traefik.http.routers.jvb-ws.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.jvb-ws.priority=100"
+      - "traefik.http.services.jvb-ws.loadbalancer.server.port=9090"
 
   # ===========================================================================
   # JITSI: Jibri Recording Service
@@ -496,6 +521,8 @@ services:
       - nextcloud_data:/backup/nextcloud:ro
       - nextcloud_db_data:/backup/nextcloud_db:ro
       - wekan_files:/backup/wekan_files:ro
+      - jitsi_prosody_config:/backup/jitsi_prosody:ro
+      - jitsi_recordings:/backup/jitsi_recordings:ro
       # Docker socket for stopping containers during backup
       - /var/run/docker.sock:/var/run/docker.sock:ro
       # Backup destination

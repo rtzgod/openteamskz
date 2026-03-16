@@ -109,7 +109,13 @@ services:
     networks:
       - data_net
     healthcheck:
-      test: [ "CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok" ]
+      test: |
+        mongosh --quiet --eval "
+        try {
+          rs.status().ok
+        } catch(e) {
+          rs.initiate({_id:'rs0', members:[{_id:0, host:'mongodb:27017'}]})
+        }"
       interval: 10s
       timeout: 10s
       retries: 10
@@ -280,13 +286,14 @@ services:
       - jitsi_web_crontabs:/var/spool/cron/crontabs:Z
       - jitsi_web_transcripts:/usr/share/jitsi-meet/transcripts:Z
     environment:
-      - ENABLE_AUTH=1
+      - ENABLE_AUTH=0
       - ENABLE_GUESTS=1
       - ENABLE_COLIBRI_WEBSOCKET=1
-      - ENABLE_XMPP_WEBSOCKET=1
+      - ENABLE_XMPP_WEBSOCKET=0
       - DISABLE_HTTPS=1
       - ENABLE_HTTP_REDIRECT=0
       - PUBLIC_URL=http://meet.localhost
+      - BOSH_RELATIVE=true
       - TZ=${TZ:-UTC}
       - XMPP_DOMAIN=meet.jitsi
       - XMPP_AUTH_DOMAIN=auth.meet.jitsi
@@ -321,7 +328,7 @@ services:
       - jitsi_prosody_plugins:/prosody-plugins-custom:Z
     environment:
       # Authentication
-      - ENABLE_AUTH=1
+      - ENABLE_AUTH=0
       - ENABLE_GUESTS=1
       - AUTH_TYPE=ldap
       - LDAP_URL=ldap://lldap:3890
@@ -362,7 +369,7 @@ services:
     volumes:
       - jitsi_jicofo_config:/config:Z
     environment:
-      - ENABLE_AUTH=1
+      - ENABLE_AUTH=0
       - AUTH_TYPE=ldap
       - JICOFO_AUTH_PASSWORD=${JICOFO_AUTH_PASSWORD:-jicofopass123}
       - TZ=${TZ:-UTC}
@@ -410,6 +417,12 @@ services:
       - data_net
     depends_on:
       - prosody
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.jvb-ws.rule=Host(`meet.localhost`) && PathPrefix(`/colibri-ws/`)"
+      - "traefik.http.routers.jvb-ws.entrypoints=web"
+      - "traefik.http.routers.jvb-ws.priority=100"
+      - "traefik.http.services.jvb-ws.loadbalancer.server.port=9090"
 
   # ===========================================================================
   # JITSI: Jibri Recording Service
